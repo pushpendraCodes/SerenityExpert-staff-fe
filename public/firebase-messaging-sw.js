@@ -9,9 +9,6 @@ importScripts("https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-com
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
-// Vite can't inject build-time env vars into a static /public file, so the
-// Firebase web config is passed in as query params when the SW is registered
-// (see src/lib/firebase.ts requestFcmToken()).
 const params = new URL(self.location.href).searchParams;
 const firebaseConfig = {
   apiKey: params.get("apiKey"),
@@ -22,22 +19,53 @@ const firebaseConfig = {
   appId: params.get("appId"),
 };
 
+function isIncomingCallData(data) {
+  if (!data) return false;
+  return (
+    data.type === "incoming_call" ||
+    data.type === "call" ||
+    Boolean(data.callId)
+  );
+}
+
+function buildIncomingCallPayload(data) {
+  return {
+    callId: data.callId || "",
+    callerName: data.callerName || "A user",
+    callerAvatar: data.callerAvatar || "",
+    pricePerMinute: data.pricePerMinute || "",
+  };
+}
+
+function buildCallDeepLink(data) {
+  const payload = buildIncomingCallPayload(data);
+  const q = new URLSearchParams({
+    incoming: "1",
+    callId: payload.callId,
+    callerName: payload.callerName,
+  });
+  if (payload.callerAvatar) q.set("callerAvatar", payload.callerAvatar);
+  if (payload.pricePerMinute) q.set("pricePerMinute", String(payload.pricePerMinute));
+  return `/calls?${q.toString()}`;
+}
+
 if (firebaseConfig.apiKey && firebaseConfig.projectId) {
   firebase.initializeApp(firebaseConfig);
   const messaging = firebase.messaging();
 
   messaging.onBackgroundMessage((payload) => {
-    const title = payload.notification?.title || payload.data?.title || "SerenityExpert";
-    const body = payload.notification?.body || payload.data?.body || "You have a new update";
-    const isCall = payload.data?.type === "incoming_call";
+    const data = payload.data || {};
+    const title = payload.notification?.title || data.title || "SerenityExpert";
+    const body = payload.notification?.body || data.body || "You have a new update";
+    const isCall = isIncomingCallData(data);
 
     self.registration.showNotification(title, {
       body,
       icon: "/favicon.svg",
       badge: "/favicon.svg",
-      tag: isCall ? `call-${payload.data?.callId}` : undefined,
+      tag: isCall && data.callId ? `call-${data.callId}` : undefined,
       requireInteraction: isCall,
-      data: payload.data || {},
+      data,
     });
   });
 }
@@ -45,20 +73,36 @@ if (firebaseConfig.apiKey && firebaseConfig.projectId) {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const data = event.notification.data || {};
+
   let targetUrl = "/notifications";
-  if (data.type === "chat" || data.chatId) {
+  let incomingPayload = null;
+
+  if (data.type === "chat" || (data.chatId && !isIncomingCallData(data))) {
     targetUrl = data.chatId ? `/chats?chat=${data.chatId}` : "/chats";
-  } else if (data.type === "call" || data.type === "incoming_call" || data.callId) {
-    targetUrl = "/calls";
+  } else if (isIncomingCallData(data)) {
+    incomingPayload = buildIncomingCallPayload(data);
+    targetUrl = buildCallDeepLink(data);
   }
 
   event.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clientsArr) => {
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (clientsArr) => {
       const existing = clientsArr.find((c) => c.url.includes(self.location.origin));
+
       if (existing) {
-        existing.focus();
-        return existing.navigate ? existing.navigate(targetUrl) : undefined;
+        // Tell the open portal to show Accept/Reject banner immediately
+        if (incomingPayload?.callId) {
+          existing.postMessage({
+            type: "INCOMING_CALL",
+            payload: incomingPayload,
+          });
+        }
+        await existing.focus();
+        if (existing.navigate) {
+          return existing.navigate(targetUrl);
+        }
+        return undefined;
       }
+
       return self.clients.openWindow(targetUrl);
     })
   );
