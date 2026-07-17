@@ -6,16 +6,27 @@ import { fetchDashboard } from "@/store/slices/dashboardSlice";
 import { Button } from "./ui/Button";
 import { formatDuration, formatINR } from "@/lib/utils";
 import {
+  buildAnalyser,
   createRingtone,
   getBeatLevels,
-  openMicStream,
+  safeCloseAudioContext,
   startRecorder,
 } from "@/lib/callMedia";
+import {
+  generateUidFromUserId,
+  getLocalMediaStream,
+  joinCallChannel,
+  leaveCallChannel,
+  type CallSession,
+} from "@/lib/agora";
 
 export function IncomingCallBanner() {
   const dispatch = useAppDispatch();
   const incoming = useAppSelector((s) => s.calls.incoming);
   const activeCall = useAppSelector((s) => s.calls.activeCall);
+  const agoraToken = useAppSelector((s) => s.calls.agoraToken);
+  const channelName = useAppSelector((s) => s.calls.channelName);
+  const user = useAppSelector((s) => s.auth.user);
   const timer = useAppSelector((s) => s.calls.timer);
   const ending = useAppSelector((s) => s.calls.ending);
   const peerEnded = useAppSelector((s) => s.calls.peerEnded);
@@ -31,6 +42,9 @@ export function IncomingCallBanner() {
   const rafRef = useRef<number | null>(null);
   const ringtoneRef = useRef<ReturnType<typeof createRingtone> | null>(null);
   const endingRef = useRef(false);
+  const callSessionRef = useRef<CallSession | null>(null);
+  const intentionalLeaveRef = useRef(false);
+  const accessToken = useAppSelector((s) => s.auth.accessToken);
 
   // Ringtone for incoming
   useEffect(() => {
@@ -47,17 +61,35 @@ export function IncomingCallBanner() {
     };
   }, [incoming, activeCall]);
 
-  // Lock page while in call or ringing banner
+  // Lock page while in call or ringing banner; also end call on tab close so it doesn't stay stuck
   useEffect(() => {
     const locked = Boolean(incoming || activeCall);
     if (!locked) return;
+
+    const endViaKeepalive = () => {
+      if (!activeCall || endingRef.current || intentionalLeaveRef.current) return;
+      intentionalLeaveRef.current = true;
+      const apiBase = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+      if (!accessToken) return;
+      try {
+        void fetch(`${apiBase}/calls/${activeCall._id}/end`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          keepalive: true,
+        });
+      } catch {
+        /* ignore */
+      }
+    };
+
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      endViaKeepalive();
       e.preventDefault();
       e.returnValue = "";
     };
-    // Best-effort block of refresh/close keyboard shortcuts. The browser's own
-    // reload button can't be disabled from JS, but it still triggers
-    // beforeunload above, which prompts the user before leaving.
     const onKeyDown = (e: KeyboardEvent) => {
       const isRefresh =
         e.key === "F5" || ((e.ctrlKey || e.metaKey) && (e.key === "r" || e.key === "R"));
@@ -65,50 +97,16 @@ export function IncomingCallBanner() {
       if (isRefresh || isClose) e.preventDefault();
     };
     window.addEventListener("beforeunload", onBeforeUnload);
+    window.addEventListener("pagehide", endViaKeepalive);
     window.addEventListener("keydown", onKeyDown, true);
     document.body.style.overflow = "hidden";
     return () => {
       window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", endViaKeepalive);
       window.removeEventListener("keydown", onKeyDown, true);
       document.body.style.overflow = "";
     };
-  }, [incoming, activeCall]);
-
-  // Mic + beat + recorder when active
-  useEffect(() => {
-    if (!activeCall) return;
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const { stream, analyser, ctx } = await openMicStream();
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          void ctx.close();
-          return;
-        }
-        streamRef.current = stream;
-        analyserRef.current = analyser;
-        audioCtxRef.current = ctx;
-        recorderRef.current = startRecorder(stream);
-        const tick = () => {
-          if (analyserRef.current) setLevels(getBeatLevels(analyserRef.current));
-          rafRef.current = requestAnimationFrame(tick);
-        };
-        rafRef.current = requestAnimationFrame(tick);
-      } catch {
-        setMicError("Allow microphone access to take the call");
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-      void audioCtxRef.current?.close();
-      streamRef.current = null;
-    };
-  }, [activeCall]);
+  }, [incoming, activeCall, accessToken]);
 
   const cleanupMedia = useCallback(async () => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -120,17 +118,104 @@ export function IncomingCallBanner() {
       /* ignore */
     }
     recorderRef.current = null;
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    void audioCtxRef.current?.close();
+    safeCloseAudioContext(audioCtxRef.current);
+    audioCtxRef.current = null;
     streamRef.current = null;
+    intentionalLeaveRef.current = true;
+    await leaveCallChannel(callSessionRef.current);
+    callSessionRef.current = null;
     return blob;
   }, []);
+
+  const forceEndCall = useCallback(async () => {
+    if (!activeCall || endingRef.current) return;
+    endingRef.current = true;
+    intentionalLeaveRef.current = true;
+    const callId = activeCall._id;
+    await cleanupMedia();
+    try {
+      await dispatch(endCall(callId));
+    } finally {
+      await dispatch(fetchDashboard());
+      endingRef.current = false;
+    }
+  }, [activeCall, cleanupMedia, dispatch]);
+
+  // Join the Agora voice channel + beat visualizer + recorder when active
+  useEffect(() => {
+    if (!activeCall || !channelName || !user?._id) return;
+    let cancelled = false;
+    intentionalLeaveRef.current = false;
+
+    (async () => {
+      try {
+        const appId = (import.meta.env.VITE_AGORA_APP_ID || "").trim();
+        if (!appId) {
+          throw new Error(
+            "Agora App ID is missing. Set VITE_AGORA_APP_ID in Vercel env and redeploy."
+          );
+        }
+        const uid = generateUidFromUserId(user._id);
+        const session = await joinCallChannel({
+          appId,
+          channelName,
+          token: agoraToken || "",
+          uid,
+          onConnectionLost: () => {
+            if (cancelled || intentionalLeaveRef.current) return;
+            void forceEndCall();
+          },
+        });
+        if (cancelled) {
+          await leaveCallChannel(session);
+          return;
+        }
+        callSessionRef.current = session;
+
+        const stream = getLocalMediaStream(session);
+        const { analyser, ctx } = buildAnalyser(stream);
+        streamRef.current = stream;
+        analyserRef.current = analyser;
+        audioCtxRef.current = ctx;
+        recorderRef.current = startRecorder(stream);
+        const tick = () => {
+          if (analyserRef.current) setLevels(getBeatLevels(analyserRef.current));
+          rafRef.current = requestAnimationFrame(tick);
+        };
+        rafRef.current = requestAnimationFrame(tick);
+      } catch (err) {
+        const name = err instanceof Error ? err.name : "";
+        const isPermissionError = name === "NotAllowedError" || name === "PermissionDeniedError";
+        console.error("[call] failed to join voice channel:", err);
+        setMicError(
+          isPermissionError
+            ? "Allow microphone access to take the call"
+            : "Could not connect the call audio — ending call"
+        );
+        if (!cancelled) void forceEndCall();
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      safeCloseAudioContext(audioCtxRef.current);
+      audioCtxRef.current = null;
+      streamRef.current = null;
+      if (callSessionRef.current) {
+        intentionalLeaveRef.current = true;
+        void leaveCallChannel(callSessionRef.current);
+        callSessionRef.current = null;
+      }
+    };
+  }, [activeCall, channelName, agoraToken, user?._id, forceEndCall]);
 
   // User hung up — upload recording then clear
   useEffect(() => {
     if (!peerEnded || !activeCall || endingRef.current) return;
     (async () => {
       endingRef.current = true;
+      intentionalLeaveRef.current = true;
       const callId = activeCall._id;
       const blob = await cleanupMedia();
       if (blob && blob.size > 0) {
@@ -150,6 +235,7 @@ export function IncomingCallBanner() {
   const onEnd = async () => {
     if (!activeCall || endingRef.current) return;
     endingRef.current = true;
+    intentionalLeaveRef.current = true;
     const callId = activeCall._id;
     const blob = await cleanupMedia();
     await dispatch(endCall(callId));

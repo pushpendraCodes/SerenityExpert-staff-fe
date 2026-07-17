@@ -1,15 +1,13 @@
 import { useEffect } from "react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
-import { clearEarningsMessage, fetchEarnings, requestWithdraw } from "@/store/slices/earningsSlice";
+import { clearEarningsMessage, fetchEarnings } from "@/store/slices/earningsSlice";
 import { fetchDashboard } from "@/store/slices/dashboardSlice";
-import { Button } from "@/components/ui/Button";
 import { cn, formatINR, formatRelativeTime } from "@/lib/utils";
 
 export default function EarningsPage() {
   const dispatch = useAppDispatch();
-  const { payouts, loading, withdrawing, error, message } = useAppSelector((s) => s.earnings);
+  const { payouts, loading, error } = useAppSelector((s) => s.earnings);
   const earnings = useAppSelector((s) => s.dashboard.data?.earnings);
-  const expert = useAppSelector((s) => s.auth.expert);
 
   useEffect(() => {
     dispatch(fetchEarnings());
@@ -17,37 +15,22 @@ export default function EarningsPage() {
   }, [dispatch]);
 
   useEffect(() => {
-    if (!message && !error) return;
+    if (!error) return;
     const t = setTimeout(() => dispatch(clearEarningsMessage()), 4000);
     return () => clearTimeout(t);
-  }, [message, error, dispatch]);
+  }, [error, dispatch]);
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-ink">Earnings & payouts</h1>
-          <p className="mt-1 text-sm text-muted">Track what’s owed and request withdrawals</p>
-        </div>
-        <Button
-          loading={withdrawing}
-          onClick={() => dispatch(requestWithdraw())}
-          disabled={!expert?.bankDetails?.accountNumber}
-        >
-          Request withdrawal
-        </Button>
+      <div>
+        <h1 className="text-2xl font-bold text-ink">Earnings & payouts</h1>
+        <p className="mt-1 text-sm text-muted">
+          Track your earnings. Payouts are processed automatically every week, or by admin.
+        </p>
       </div>
 
-      {!expert?.bankDetails?.accountNumber && (
-        <p className="rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-ink-soft">
-          Add bank details in Profile before requesting a withdrawal.
-        </p>
-      )}
-
-      {(message || error) && (
-        <p className={cn("rounded-xl px-4 py-3 text-sm", error ? "bg-danger/10 text-danger" : "bg-mint text-mint-text")}>
-          {error || message}
-        </p>
+      {error && (
+        <p className="rounded-xl bg-danger/10 px-4 py-3 text-sm text-danger">{error}</p>
       )}
 
       <div className="grid gap-4 sm:grid-cols-3">

@@ -42,12 +42,26 @@ export async function openMicStream(): Promise<{
   ctx: AudioContext;
 }> {
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  const { analyser, ctx } = buildAnalyser(stream);
+  return { stream, analyser, ctx };
+}
+
+/** Build a beat-visualizer analyser from an existing stream (e.g. an Agora local audio track) */
+export function buildAnalyser(stream: MediaStream): { analyser: AnalyserNode; ctx: AudioContext } {
   const ctx = new AudioContext();
   const source = ctx.createMediaStreamSource(stream);
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 64;
   source.connect(analyser);
-  return { stream, analyser, ctx };
+  return { analyser, ctx };
+}
+
+/** Idempotent AudioContext close — safe to call more than once (e.g. from overlapping cleanup paths) */
+export function safeCloseAudioContext(ctx: AudioContext | null): void {
+  if (!ctx || ctx.state === "closed") return;
+  ctx.close().catch(() => {
+    /* ignore — already closing/closed */
+  });
 }
 
 export function startRecorder(stream: MediaStream) {
