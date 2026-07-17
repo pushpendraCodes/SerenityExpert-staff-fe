@@ -1,6 +1,8 @@
 import { type FormEvent, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { LogOut } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
-import { fetchProfile, setExpert } from "@/store/slices/authSlice";
+import { fetchProfile, logout, setExpert } from "@/store/slices/authSlice";
 import { apiPut, apiUpload, getErrorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import type { Expert } from "@/types";
@@ -9,6 +11,7 @@ const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
 export default function ProfilePage() {
   const dispatch = useAppDispatch();
+  const navigate = useNavigate();
   const { user, expert } = useAppSelector((s) => s.auth);
   const [name, setName] = useState("");
   const [bio, setBio] = useState("");
@@ -84,11 +87,25 @@ export default function ProfilePage() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-ink">Profile</h1>
-        <p className="mt-1 text-sm text-muted">
-          Public bio, experience, languages & payout details
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-ink">Profile</h1>
+          <p className="mt-1 text-sm text-muted">
+            Public bio, experience, languages & payout details
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="danger"
+          size="sm"
+          className="lg:hidden"
+          onClick={async () => {
+            await dispatch(logout());
+            navigate("/login");
+          }}
+        >
+          <LogOut className="h-4 w-4" /> Logout
+        </Button>
       </div>
 
       <form onSubmit={onSave} className="card space-y-5 p-6">

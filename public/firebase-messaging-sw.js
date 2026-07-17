@@ -9,6 +9,11 @@ importScripts("https://www.gstatic.com/firebasejs/10.14.1/firebase-messaging-com
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
+// Required for Chrome/Android "Add to Home Screen" / installability criteria
+self.addEventListener("fetch", (event) => {
+  event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
+});
+
 const params = new URL(self.location.href).searchParams;
 const firebaseConfig = {
   apiKey: params.get("apiKey"),
@@ -61,10 +66,12 @@ if (firebaseConfig.apiKey && firebaseConfig.projectId) {
 
     self.registration.showNotification(title, {
       body,
-      icon: "/favicon.svg",
-      badge: "/favicon.svg",
+      icon: "/icons/icon-192.png",
+      badge: "/icons/icon-192.png",
       tag: isCall && data.callId ? `call-${data.callId}` : undefined,
       requireInteraction: isCall,
+      vibrate: isCall ? [300, 100, 300, 100, 300] : [100, 50, 100],
+      silent: false,
       data,
     });
   });

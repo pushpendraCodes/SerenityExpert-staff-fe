@@ -2,8 +2,6 @@ import { initializeApp, getApps, type FirebaseApp } from "firebase/app";
 import {
   getMessaging,
   getToken,
-  register,
-  onRegistered,
   onMessage,
   isSupported,
   type Messaging,
@@ -30,7 +28,7 @@ let messaging: Messaging | null = null;
 async function getMessagingInstance(): Promise<Messaging | null> {
   if (!isFirebaseConfigured()) {
     console.warn(
-      "[FCM] Missing Firebase env. Staff portal needs VITE_FIREBASE_* keys in staff/.env (not NEXT_PUBLIC_*)."
+      "[FCM] Missing Firebase env. Staff portal needs VITE_FIREBASE_* keys in Vercel (and staff/.env locally)."
     );
     return null;
   }
@@ -39,7 +37,7 @@ async function getMessagingInstance(): Promise<Messaging | null> {
     return null;
   }
   if (!(await isSupported().catch(() => false))) {
-    console.warn("[FCM] Firebase Messaging is not supported in this browser.");
+    console.warn("[FCM] Firebase Messaging is not supported in this browser (e.g. iOS Safari without PWA).");
     return null;
   }
 
@@ -62,61 +60,16 @@ async function registerServiceWorker(): Promise<ServiceWorkerRegistration> {
     appId: firebaseConfig.appId || "",
   });
   const swRegistration = await navigator.serviceWorker.register(
-    `/firebase-messaging-sw.js?${swParams.toString()}`
+    `/firebase-messaging-sw.js?${swParams.toString()}`,
+    { scope: "/" }
   );
   await navigator.serviceWorker.ready;
   return swRegistration;
 }
 
 /**
- * Prefer the new register/onRegistered FID flow; fall back to getToken so
- * push still works if onRegistered never fires.
- */
-async function obtainPushId(
-  msg: Messaging,
-  swRegistration: ServiceWorkerRegistration
-): Promise<string | null> {
-  const fid = await new Promise<string | null>((resolve) => {
-    let settled = false;
-    const finish = (value: string | null) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      unsub();
-      resolve(value);
-    };
-
-    const timeout = setTimeout(() => finish(null), 8000);
-    const unsub = onRegistered(msg, (id) => finish(id || null));
-
-    register(msg, {
-      vapidKey,
-      serviceWorkerRegistration: swRegistration,
-    }).catch((err) => {
-      console.warn("[FCM] register() failed:", err);
-      finish(null);
-    });
-  });
-
-  if (fid) return fid;
-
-  // Fallback: classic FCM registration token (still accepted by Admin SDK)
-  try {
-    // getToken is deprecated but remains the reliable path for legacy token sends
-    const token = await getToken(msg, {
-      vapidKey,
-      serviceWorkerRegistration: swRegistration,
-    });
-    return token || null;
-  } catch (err) {
-    console.warn("[FCM] getToken() fallback failed:", err);
-    return null;
-  }
-}
-
-/**
  * Registers the FCM service worker, asks for notification permission, and
- * returns a device push id (FID or FCM token) to send to the backend.
+ * returns a classic FCM registration token (works with Firebase Admin SDK).
  */
 export async function requestFcmToken(): Promise<string | null> {
   try {
@@ -133,11 +86,20 @@ export async function requestFcmToken(): Promise<string | null> {
     }
 
     const swRegistration = await registerServiceWorker();
-    const pushId = await obtainPushId(msg, swRegistration);
-    if (!pushId) {
-      console.warn("[FCM] Could not obtain push id (register + getToken both empty).");
+
+    // Prefer getToken — returns tokens Firebase Admin can deliver to.
+    const token = await getToken(msg, {
+      vapidKey,
+      serviceWorkerRegistration: swRegistration,
+    });
+
+    if (!token) {
+      console.warn("[FCM] getToken() returned empty — check VAPID key & Firebase console Cloud Messaging.");
+      return null;
     }
-    return pushId;
+
+    console.info("[FCM] Token registered");
+    return token;
   } catch (err) {
     console.warn("[FCM] token request failed:", err);
     return null;
@@ -149,6 +111,15 @@ export function getNotificationPermission(): NotificationPermission | "unsupport
   return Notification.permission;
 }
 
+export function isPushSupported(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    "Notification" in window &&
+    "serviceWorker" in navigator &&
+    isFirebaseConfigured()
+  );
+}
+
 export async function listenForegroundMessages(
   onMessageReceived: (payload: { title?: string; body?: string; data?: Record<string, string> }) => void
 ) {
@@ -157,8 +128,8 @@ export async function listenForegroundMessages(
 
   return onMessage(msg, (payload) => {
     onMessageReceived({
-      title: payload.notification?.title,
-      body: payload.notification?.body,
+      title: payload.notification?.title || (payload.data?.title as string | undefined),
+      body: payload.notification?.body || (payload.data?.body as string | undefined),
       data: payload.data as Record<string, string> | undefined,
     });
   });

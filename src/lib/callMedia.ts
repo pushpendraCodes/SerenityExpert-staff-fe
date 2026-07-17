@@ -1,35 +1,82 @@
 /** Web Audio ringtone + mic analyser helpers for in-call UI */
 
+/** Phone-like dual-tone ring — loud enough to hear on mobile speakers */
 export function createRingtone() {
   let ctx: AudioContext | null = null;
   let interval: ReturnType<typeof setInterval> | null = null;
   let playing = false;
 
-  const beep = () => {
+  const ensureCtx = async () => {
     if (!ctx) ctx = new AudioContext();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = "sine";
-    osc.frequency.value = 740;
-    gain.gain.value = 0.1;
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
-    osc.stop(ctx.currentTime + 0.45);
+    if (ctx.state === "suspended") {
+      await ctx.resume().catch(() => undefined);
+    }
+    return ctx;
+  };
+
+  const beep = async () => {
+    const audio = await ensureCtx();
+    const now = audio.currentTime;
+
+    // Dual oscillators (classic ringtone feel) at high volume
+    const master = audio.createGain();
+    master.gain.value = 0;
+    master.connect(audio.destination);
+
+    const makeOsc = (freq: number) => {
+      const osc = audio.createOscillator();
+      const g = audio.createGain();
+      osc.type = "square";
+      osc.frequency.value = freq;
+      g.gain.value = 0.35;
+      osc.connect(g);
+      g.connect(master);
+      osc.start(now);
+      osc.stop(now + 0.55);
+      return osc;
+    };
+
+    makeOsc(880);
+    makeOsc(980);
+
+    // Attack → sustain → release (peak ~0.85 — loud but not clipping)
+    master.gain.setValueAtTime(0.001, now);
+    master.gain.exponentialRampToValueAtTime(0.85, now + 0.04);
+    master.gain.setValueAtTime(0.85, now + 0.4);
+    master.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+  };
+
+  const vibrate = () => {
+    try {
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        navigator.vibrate([280, 120, 280, 120, 280]);
+      }
+    } catch {
+      /* ignore */
+    }
   };
 
   return {
     start() {
       if (playing) return;
       playing = true;
-      beep();
-      interval = setInterval(beep, 1600);
+      void beep();
+      vibrate();
+      // Faster cadence so it's harder to miss
+      interval = setInterval(() => {
+        void beep();
+        vibrate();
+      }, 1100);
     },
     stop() {
       playing = false;
       if (interval) clearInterval(interval);
       interval = null;
+      try {
+        navigator.vibrate?.(0);
+      } catch {
+        /* ignore */
+      }
       void ctx?.close();
       ctx = null;
     },

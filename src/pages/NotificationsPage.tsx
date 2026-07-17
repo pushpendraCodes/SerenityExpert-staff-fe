@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { fetchNotifications, markNotificationRead } from "@/store/slices/notificationSlice";
-import { setIncomingCall } from "@/store/slices/callSlice";
+import { openIncomingCallIfAvailable } from "@/store/slices/callSlice";
 import { Pagination } from "@/components/ui/Pagination";
 import { formatRelativeTime } from "@/lib/utils";
 import type { Notification } from "@/types";
@@ -13,17 +13,7 @@ function notificationPath(n: Notification): string | null {
     return chatId ? `/chats?chat=${String(chatId)}` : "/chats";
   }
   if (n.type === "call") {
-    const callId = n.data?.callId;
-    if (callId) {
-      const q = new URLSearchParams({
-        incoming: "1",
-        callId: String(callId),
-        callerName: String(n.data?.callerName || "A user"),
-      });
-      if (n.data?.callerAvatar) q.set("callerAvatar", String(n.data.callerAvatar));
-      if (n.data?.pricePerMinute) q.set("pricePerMinute", String(n.data.pricePerMinute));
-      return `/calls?${q.toString()}`;
-    }
+    // Always go to calls list; banner only opens if call is still ringing
     return "/calls";
   }
   return null;
@@ -42,18 +32,20 @@ export default function NotificationsPage() {
     dispatch(fetchNotifications(nextPage));
   };
 
-  const onClickNotification = (n: Notification) => {
+  const onClickNotification = async (n: Notification) => {
     if (!n.isRead) dispatch(markNotificationRead(n._id));
 
     if (n.type === "call" && n.data?.callId) {
-      dispatch(
-        setIncomingCall({
+      await dispatch(
+        openIncomingCallIfAvailable({
           callId: String(n.data.callId),
           callerName: String(n.data.callerName || "A user"),
           callerAvatar: n.data.callerAvatar ? String(n.data.callerAvatar) : undefined,
           pricePerMinute: n.data.pricePerMinute ? Number(n.data.pricePerMinute) : undefined,
         })
       );
+      navigate("/calls");
+      return;
     }
 
     const path = notificationPath(n);

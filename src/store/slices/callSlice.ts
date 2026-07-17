@@ -1,10 +1,10 @@
 import { createSlice, createAsyncThunk, type PayloadAction } from "@reduxjs/toolkit";
-import { apiGetPaginated, apiPost, apiUpload, getErrorMessage } from "@/lib/api";
-import type { Call, Pagination } from "@/types";
+import { apiGet, apiGetPaginated, apiPost, apiUpload, getErrorMessage } from "@/lib/api";
+import type { Call, Pagination, User } from "@/types";
 
 const CALLS_PAGE_SIZE = 10;
 
-interface IncomingCall {
+export interface IncomingCall {
   callId: string;
   callerName: string;
   callerAvatar?: string;
@@ -30,6 +30,8 @@ interface CallState {
   ending: boolean;
   peerEnded: boolean;
   error: string | null;
+  /** Shown when user taps a stale call notification */
+  notice: string | null;
 }
 
 const initialState: CallState = {
@@ -45,7 +47,18 @@ const initialState: CallState = {
   ending: false,
   peerEnded: false,
   error: null,
+  notice: null,
 };
+
+function callerFromCall(call: Call, fallback?: IncomingCall): IncomingCall {
+  const user = call.userId && typeof call.userId !== "string" ? (call.userId as User) : null;
+  return {
+    callId: call._id,
+    callerName: fallback?.callerName || user?.name || "A user",
+    callerAvatar: fallback?.callerAvatar || user?.avatar,
+    pricePerMinute: fallback?.pricePerMinute ?? call.pricePerMinute,
+  };
+}
 
 export const fetchCallHistory = createAsyncThunk(
   "calls/history",
@@ -63,6 +76,33 @@ export const fetchCallHistory = createAsyncThunk(
       };
     } catch (e) {
       return rejectWithValue(getErrorMessage(e));
+    }
+  }
+);
+
+/**
+ * Open incoming-call banner only if the call is still ringing.
+ * Used when tapping push/in-app notifications for old calls.
+ */
+export const openIncomingCallIfAvailable = createAsyncThunk(
+  "calls/openIncomingIfAvailable",
+  async (payload: IncomingCall, { rejectWithValue }) => {
+    try {
+      const res = await apiGet<Call>(`/calls/${payload.callId}`);
+      const call = res.data;
+      if (!call) {
+        return rejectWithValue("This call is no longer available");
+      }
+      if (call.status !== "ringing") {
+        const msg =
+          call.status === "active"
+            ? "This call was already answered"
+            : "This call is no longer available";
+        return rejectWithValue(msg);
+      }
+      return callerFromCall(call, payload);
+    } catch (e) {
+      return rejectWithValue(getErrorMessage(e, "This call is no longer available"));
     }
   }
 );
@@ -123,6 +163,7 @@ const callSlice = createSlice({
   reducers: {
     setIncomingCall(state, action: PayloadAction<IncomingCall | null>) {
       state.incoming = action.payload;
+      if (action.payload) state.notice = null;
     },
     clearActiveCall(state) {
       state.activeCall = null;
@@ -138,6 +179,9 @@ const callSlice = createSlice({
     markPeerEnded(state) {
       state.peerEnded = true;
       state.incoming = null;
+    },
+    clearCallNotice(state) {
+      state.notice = null;
     },
   },
   extraReducers: (builder) => {
@@ -156,12 +200,24 @@ const callSlice = createSlice({
         state.loading = false;
         state.error = action.payload as string;
       })
+      .addCase(openIncomingCallIfAvailable.fulfilled, (state, action) => {
+        state.incoming = action.payload;
+        state.notice = null;
+      })
+      .addCase(openIncomingCallIfAvailable.rejected, (state, action) => {
+        state.incoming = null;
+        state.notice = (action.payload as string) || "This call is no longer available";
+      })
       .addCase(acceptCall.fulfilled, (state, action) => {
         state.incoming = null;
         state.peerEnded = false;
         state.activeCall = action.payload.call;
         state.agoraToken = action.payload.agoraToken || null;
         state.channelName = action.payload.channelName || null;
+      })
+      .addCase(acceptCall.rejected, (state, action) => {
+        state.incoming = null;
+        state.notice = (action.payload as string) || "Could not accept call";
       })
       .addCase(rejectCall.fulfilled, (state) => {
         state.incoming = null;
@@ -185,5 +241,6 @@ const callSlice = createSlice({
   },
 });
 
-export const { setIncomingCall, clearActiveCall, setTimer, markPeerEnded } = callSlice.actions;
+export const { setIncomingCall, clearActiveCall, setTimer, markPeerEnded, clearCallNotice } =
+  callSlice.actions;
 export default callSlice.reducer;
